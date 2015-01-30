@@ -162,6 +162,7 @@ stat_type = {
 -- ---------------------------------
 function bmp_proto.dissector(buf, pinfo, tree)
     local offset = 0
+    local info = {}
     while offset < buf:len() do
 
         local _version_range = buf(offset,1)
@@ -178,7 +179,7 @@ function bmp_proto.dissector(buf, pinfo, tree)
             return
         end
         local bmp_tree = tree:add(bmp_proto, buf(offset, _length))
-        bmp_tree:set_text("BGP Monitoring Protocol: " .. bmp_type[_type])
+        bmp_tree:set_text("BGP Monitoring Protocol, Type: " .. bmp_type[_type])
         bmp_tree:add(fields['bmp.version'], _version_range)
         bmp_tree:add(fields['bmp.length'], _length_range)
         bmp_tree:add(fields['bmp.type'], _type_range):append_text(" (" .. bmp_type[_type] .. ")")
@@ -188,24 +189,32 @@ function bmp_proto.dissector(buf, pinfo, tree)
         offset = offset + _length
 
         if bmp_type[_type] == "Route Monitoring" then
+            table.insert(info, "Route Monitoring")
             bmp_route_monitoring(reader, pinfo, bmp_tree)
 
         elseif bmp_type[_type] == "Statistics Report" then
+            table.insert(info, "Statistics Report")
             bmp_statistics(reader, pinfo, bmp_tree)
 
         elseif bmp_type[_type] == "Peer Down Notification" then
+            table.insert(info, "Peer Down Notification")
             bmp_peer_down(reader, pinfo, bmp_tree)
 
         elseif bmp_type[_type] == "Peer Up Notification" then
+            table.insert(info, "Peer Up Notification")
             bmp_peer_up(reader, pinfo, bmp_tree)
 
         elseif bmp_type[_type] == "Initiation Message" then
+            table.insert(info, "Initiation Message")
             bmp_init(reader, pinfo, bmp_tree)
 
         elseif bmp_type[_type] == "Termination Message" then
+            table.insert(info, "Termination Message")
             bmp_termination(reader, pinfo, bmp_tree)
         end
     end
+    pinfo.cols.protocol = "BMP"
+    pinfo.cols.info = table.concat(info, ", ")
 end
 
 
