@@ -1,4 +1,4 @@
--- #################################################
+ -- #################################################
 -- BGP Monitoring protocol dissector
 -- Refer:
 --   https://tools.ietf.org/id/draft-ietf-grow-bmp-07.txt
@@ -13,11 +13,14 @@ bmp_proto = Proto("bmp","BGP Monitoring Protocol")
 --     Util
 -- =================================
 local VALS_BOOL	= {[0] = "False", [1] = "True"}
+local BMPv1_HEADER_LEN = 44
+local BGP_MARKER_LEN   = 16
 
 BMPReader = {}
-BMPReader.new = function(buf, offset)
+BMPReader.new = function(version, buf, offset)
     local self = {}
     offset = offset or 0
+    proto_version = version
 
     self.read = function(length)
         local r = buf(offset, length)
@@ -43,6 +46,10 @@ BMPReader.new = function(buf, offset)
         end
     end
 
+    self.get_version = function()
+        return proto_version
+    end
+     
     return self
 end
 
@@ -144,6 +151,13 @@ termination_reason = {
     [3] = "Redundant connection",
 }
 
+peer_down_reason = {
+    [1] = "Closed by the local system with a notification",
+    [2] = "Closed by the local system without a notification",
+    [3] = "Closed by the remote system with a notification",
+    [4] = "Closed by the remote system without a notification"
+}
+
 stat_type = {
     [0] = "Number of prefixes rejected by inbound policy",
     [1] = "Number of (known) duplicate prefix advertisements",
@@ -161,18 +175,26 @@ stat_type = {
 --     4.1. Common Header
 -- ---------------------------------
 function bmp_proto.dissector(buf, pinfo, tree)
+    local space_for_length_range = 6 
     local offset = 0
     local info = {}
-    while offset < buf:len() do
+    while offset + space_for_length_range < buf:len() do
 
         local _version_range = buf(offset,1)
-        local _length_range = buf(offset+1,4)
-        local _type_range = buf(offset+5,1)
         local _version = _version_range:uint()
-        local _length = _length_range:uint()
+
+        local _type_range = _version > 1 and buf(offset+5,1) or buf(offset+1,1)
         local _type = _type_range:uint()
 
-        if offset + _length > buf:len() then
+		local _length_range = _version > 1 and buf(offset+1,4) 
+		local _length = _version > 1 and _length_range:uint() or pdu_v1_length(_type, buf, offset)
+
+        if _length == nil then
+            pinfo.desegment_offset = offset
+            pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
+            return
+
+        elseif offset + _length > buf:len() then
             pinfo.can_desegment = 1
             pinfo.desegment_len = offset + _length - buf:len()
             pinfo.desegment_offset = 0
@@ -181,12 +203,14 @@ function bmp_proto.dissector(buf, pinfo, tree)
         local bmp_tree = tree:add(bmp_proto, buf(offset, _length))
         bmp_tree:set_text("BGP Monitoring Protocol, Type: " .. bmp_type[_type])
         bmp_tree:add(fields['bmp.version'], _version_range)
-        bmp_tree:add(fields['bmp.length'], _length_range)
         bmp_tree:add(fields['bmp.type'], _type_range):append_text(" (" .. bmp_type[_type] .. ")")
+        if _version > 1 then 
+            bmp_tree:add(fields['bmp.length'], _length_range) 
+        end
 
-        local reader = BMPReader.new(buf(offset, _length))
-        reader.skip(6)
-        offset = offset + _length
+        local reader = BMPReader.new(_version, buf(offset, _length))
+        reader.skip(_version > 1 and 6 or 2) 
+        offset = offset + _length 
 
         if bmp_type[_type] == "Route Monitoring" then
             table.insert(info, "Route Monitoring")
@@ -215,8 +239,52 @@ function bmp_proto.dissector(buf, pinfo, tree)
     end
     pinfo.cols.protocol = "BMP"
     pinfo.cols.info = table.concat(info, ", ")
+
+    if  offset < buf:len() then
+        pinfo.desegment_offset = offset
+        pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
+        return
+    end       
 end
 
+function pdu_v1_length(type, buf, offset) 
+    local bmp_payload_offset = offset + BMPv1_HEADER_LEN
+
+
+    if bmp_type[type] == "Route Monitoring" then
+        if bmp_payload_offset + BGP_MARKER_LEN + 2 > buf:len() then return nil end
+        local _bgp_length = buf(bmp_payload_offset+BGP_MARKER_LEN,2):uint()
+        return BMPv1_HEADER_LEN + _bgp_length
+
+    elseif bmp_type[type] == "Statistics Report" then
+        if bmp_payload_offset + 4 > buf:len() then return nil end
+        local _count = buf(bmp_payload_offset,4):uint()
+        local payload_length = 0
+        local next_stat_length_offset = bmp_payload_offset + 6
+        for i=1,_count do
+            if next_stat_length_offset + 2 > buf:len() then return nil end
+            local stat_length = buf(next_stat_length_offset,2):uint()
+            next_stat_length_offset = next_stat_length_offset + stat_length + 4
+            payload_length = payload_length + stat_length
+        end
+        payload_length = payload_length + 4 + _count * 4
+        return BMPv1_HEADER_LEN + payload_length
+
+    elseif bmp_type[type] == "Peer Down Notification" then
+        local _reason = buf(bmp_payload_offset,1):uint()
+
+        if peer_down_reason[_reason] == "Closed by the local system with a notification"
+           or peer_down_reason[_reason] == "Closed by the remote system with a notification" then
+            local _bgp_length = buf(bmp_payload_offset+1+BGP_MARKER_LEN,2):uint()
+            return BMPv1_HEADER_LEN + _bgp_length
+
+        else
+            return BMPv1_HEADER_LEN + 1
+        end
+    end
+
+    return nil
+end
 
 -- ---------------------------------
 --     4.2. Per-Peer Header
@@ -230,7 +298,9 @@ function bmp_peer(reader, pinfo, tree)
     local _flags_l = _flags_range:bitfield(1,1)
     flags_tree = tree:add(fields['bmp.peer.flags'], _flags_range)
     flags_tree:add(fields['bmp.peer.flags.v'], _flags_range):append_text(" (" .. peer_flags_v[_flags_v] .. ")")
-    flags_tree:add(fields['bmp.peer.flags.l'], _flags_range):append_text(" (" .. peer_flags_l[_flags_l] .. ")")
+    if reader.get_version() > 1 then
+        flags_tree:add(fields['bmp.peer.flags.l'], _flags_range):append_text(" (" .. peer_flags_l[_flags_l] .. ")")
+    end
     tree:add(fields['bmp.peer.dist'], reader.read(8))
 
     if peer_flags_v[_flags_v] == "IPv4" then
