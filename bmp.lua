@@ -186,8 +186,8 @@ function bmp_proto.dissector(buf, pinfo, tree)
         local _type_range = _version > 1 and buf(offset+5,1) or buf(offset+1,1)
         local _type = _type_range:uint()
 
-		local _length_range = _version > 1 and buf(offset+1,4) 
-		local _length = _version > 1 and _length_range:uint() or pdu_v1_length(_type, buf, offset)
+        local _length_range = _version > 1 and buf(offset+1,4) 
+        local _length = _version > 1 and _length_range:uint() or pdu_v1_length(_type, buf, offset)
 
         if _length == nil then
             pinfo.desegment_offset = offset
@@ -249,7 +249,6 @@ end
 
 function pdu_v1_length(type, buf, offset) 
     local bmp_payload_offset = offset + BMPv1_HEADER_LEN
-
 
     if bmp_type[type] == "Route Monitoring" then
         if bmp_payload_offset + BGP_MARKER_LEN + 2 > buf:len() then return nil end
