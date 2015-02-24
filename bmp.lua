@@ -1,7 +1,29 @@
- -- #################################################
+-- #################################################
 -- BGP Monitoring protocol dissector
 -- Refer:
 --   https://tools.ietf.org/id/draft-ietf-grow-bmp-07.txt
+--   Appendix A.  Changes Between BMP Versions 1 and 2
+--      o  Added Peer Up Message
+--      o  Added L flag
+--      o  Editorial changes
+--
+--   Appendix B.  Changes Between BMP Versions 2 and 3
+--      o  Added a 32-bit length field to the fixed header.
+--      o  Clarified error handling.
+--      o  Added new stat types: 5 (number of updates invalidated due to
+--         ORIGINATOR_ID), 6 (number of updates invalidated due to
+--         AS_CONFED_SEQUENCE/AS_CONFED_SET), 7 (number of routes in
+--         Adj-RIB-In) and 8 (number of routes in Loc-RIB).
+--      o  Defined counters and gauges for use with stat types.
+--      o  For peer down messages, the relevant FSM event is to be sent in type 2 messages.
+--      o  Added local address and local and remote ports to the peer up message.
+--      o  Require End-of-RIB marker after initial dump.
+--      o  Added Initiation message with string content.
+--      o  Permit multiplexing pre- and post-policy feeds onto a single BMP session.
+--      o  Changed assignment policy for IANA registries.
+--      o  Changed "Loc-RIB" references to refer to "Post-Policy Adj-RIB-In", plus other editorial changes.
+--      o  Introduced option for monitoring station to be active party in initiating connection.
+--      o  Introduced Termination message.
 -- #################################################
 
 -- =================================================
@@ -183,11 +205,11 @@ function bmp_proto.dissector(buf, pinfo, tree)
         local _version_range = buf(offset,1)
         local _version = _version_range:uint()
 
-        local _type_range = _version > 1 and buf(offset+5,1) or buf(offset+1,1)
+        local _type_range = _version > 2 and buf(offset+5,1) or buf(offset+1,1)
         local _type = _type_range:uint()
 
-        local _length_range = _version > 1 and buf(offset+1,4) 
-        local _length = _version > 1 and _length_range:uint() or pdu_v1_length(_type, buf, offset)
+        local _length_range = _version > 2 and buf(offset+1,4) 
+        local _length = _version > 2 and _length_range:uint() or pdu_v1_length(_type, buf, offset)
 
         if _length == nil then
             pinfo.desegment_offset = offset
@@ -200,17 +222,18 @@ function bmp_proto.dissector(buf, pinfo, tree)
             pinfo.desegment_offset = 0
             return
         end
+
         local bmp_tree = tree:add(bmp_proto, buf(offset, _length))
         bmp_tree:set_text("BGP Monitoring Protocol, Type: " .. bmp_type[_type])
         bmp_tree:add(fields['bmp.version'], _version_range)
-        bmp_tree:add(fields['bmp.type'], _type_range):append_text(" (" .. bmp_type[_type] .. ")")
-        if _version > 1 then 
+        if _version > 2 then 
             bmp_tree:add(fields['bmp.length'], _length_range) 
         end
+        bmp_tree:add(fields['bmp.type'], _type_range):append_text(" (" .. bmp_type[_type] .. ")")
 
         local reader = BMPReader.new(_version, buf(offset, _length))
-        reader.skip(_version > 1 and 6 or 2) 
-        offset = offset + _length 
+        reader.skip(_version > 2 and 6 or 2)
+        offset = offset + _length
 
         if bmp_type[_type] == "Route Monitoring" then
             table.insert(info, "Route Monitoring")
